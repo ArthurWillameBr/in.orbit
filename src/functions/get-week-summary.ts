@@ -1,9 +1,9 @@
-import { and, count, eq, gte, lte } from "drizzle-orm";
+import { and, eq, gte, lte, sql } from "drizzle-orm";
 import { db } from "../db";
 import { goalCompletions, goals } from "../db/schema";
 import dayjs from "dayjs";
 
-export function getWeekSummary() {
+export async function getWeekSummary() {
   const lastDayOfWeek = dayjs().endOf("week").toDate();
   const firstDayOfWeek = dayjs().startOf("week").toDate();
 
@@ -24,7 +24,10 @@ export function getWeekSummary() {
       .select({
         id: goals.id,
         title: goals.title,
-        createdAt: goals.createdAt,
+        createdAt: goalCompletions.createdAt,
+        completedAtDate: sql/*sql*/ `
+            DATE(${goalCompletions.createdAt})
+          `.as("completedAtDate"),
       })
       .from(goalCompletions)
       .innerJoin(goals, eq(goals.id, goalCompletions.goalId))
@@ -35,7 +38,44 @@ export function getWeekSummary() {
         )
       )
   );
+
+  const goalsCompletedByWeekDay = db.$with("goals_completed_by_week_day").as(
+    db
+      .select({
+        completedAtDate: goalsCompletedInWeek.completedAtDate,
+        completions: sql/*sql*/ `
+            JSON_AGG(
+              JSON_BUILD_OBJECT(
+                "id", ${goalsCompletedInWeek.id},
+                "title", ${goalsCompletedInWeek.title},
+                'createdAt', ${goalsCompletedInWeek.createdAt}
+              )
+            )
+          `.as("completions"),
+      })
+      .from(goalsCompletedInWeek)
+      .groupBy(goalsCompletedInWeek.completedAtDate)
+  );
+
+  const result = await db
+    .with(goalsCreatedUpToWeek, goalsCompletedInWeek, goalsCompletedByWeekDay)
+    .select({
+      completed: sql/*sql*/ `
+          (SELECT COUNT(*) FROM ${goalsCompletedInWeek})
+        `.mapWith(Number),
+       total: sql /*sql*/`
+       (SELECT SUM(${goalsCreatedUpToWeek.desiredWeeklyFrequency}) FROM ${goalsCreatedUpToWeek})
+     `.mapWith(Number),
+      goalsPerDay: sql/*sql*/ `
+        JSON_OBJECT_AGG(
+          ${goalsCompletedByWeekDay.completedAtDate},
+          ${goalsCompletedByWeekDay.completions}
+        )
+       `,
+    })
+    .from(goalsCompletedByWeekDay);
+
   return {
-    summary: "This is the summary",
+    summary: result,
   };
 }
